@@ -9,15 +9,19 @@ use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "9ladies")]
-#[command(about = "Batch image description tool using VLMs via llama.cpp")]
+#[command(about = "Batch image description tool using VLMs via Ollama")]
 struct Args {
     /// Path to prompt configuration JSON file
     #[arg(long)]
     prompt: String,
 
-    /// llama.cpp server URL (e.g. http://localhost:8080)
+    /// Server URL (e.g. http://localhost:8080 for llama.cpp, http://localhost:11434 for Ollama)
     #[arg(long)]
     url: String,
+
+    /// Model name (required for Ollama, e.g. qwen2.5vl:32b or llava:13b)
+    #[arg(long)]
+    model: Option<String>,
 
     /// Validate inputs without calling the model
     #[arg(long)]
@@ -29,6 +33,8 @@ struct PromptConfig {
     system: String,
     prompt: String,
     temperature: f32,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -37,44 +43,35 @@ struct OutputRecord {
     response: serde_json::Value,
 }
 
+// Ollama native API types
 #[derive(Serialize)]
-struct ChatRequest {
-    messages: Vec<ChatMessage>,
+struct OllamaChatRequest {
+    model: String,
+    messages: Vec<OllamaChatMessage>,
+    stream: bool,
+    options: OllamaOptions,
+}
+
+#[derive(Serialize)]
+struct OllamaOptions {
     temperature: f32,
 }
 
 #[derive(Serialize)]
-struct ChatMessage {
+struct OllamaChatMessage {
     role: String,
-    content: Vec<ContentPart>,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum ContentPart {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "image_url")]
-    ImageUrl { image_url: ImageUrlData },
-}
-
-#[derive(Serialize)]
-struct ImageUrlData {
-    url: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    images: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
-struct ChatResponse {
-    choices: Vec<ChatChoice>,
+struct OllamaChatResponse {
+    message: OllamaMessageResponse,
 }
 
 #[derive(Deserialize)]
-struct ChatChoice {
-    message: ChatMessageResponse,
-}
-
-#[derive(Deserialize)]
-struct ChatMessageResponse {
+struct OllamaMessageResponse {
     content: String,
 }
 
@@ -143,37 +140,33 @@ fn validate_image_file(path: &Path) -> Result<Vec<u8>, String> {
 fn call_model(
     client: &reqwest::blocking::Client,
     base_url: &str,
+    model: &str,
     config: &PromptConfig,
     image_data: &[u8],
-    image_format: &str,
 ) -> Result<serde_json::Value, String> {
     let base64_image = BASE64.encode(image_data);
-    let data_url = format!("data:image/{};base64,{}", image_format, base64_image);
 
-    let request = ChatRequest {
+    let request = OllamaChatRequest {
+        model: model.to_string(),
         messages: vec![
-            ChatMessage {
+            OllamaChatMessage {
                 role: "system".to_string(),
-                content: vec![ContentPart::Text {
-                    text: config.system.clone(),
-                }],
+                content: config.system.clone(),
+                images: None,
             },
-            ChatMessage {
+            OllamaChatMessage {
                 role: "user".to_string(),
-                content: vec![
-                    ContentPart::ImageUrl {
-                        image_url: ImageUrlData { url: data_url },
-                    },
-                    ContentPart::Text {
-                        text: config.prompt.clone(),
-                    },
-                ],
+                content: config.prompt.clone(),
+                images: Some(vec![base64_image]),
             },
         ],
-        temperature: config.temperature,
+        stream: false,
+        options: OllamaOptions {
+            temperature: config.temperature,
+        },
     };
 
-    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+    let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
 
     let response = client
         .post(&url)
@@ -187,15 +180,11 @@ fn call_model(
         return Err(format!("Server returned {}: {}", status, body));
     }
 
-    let chat_response: ChatResponse = response
+    let chat_response: OllamaChatResponse = response
         .json()
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
-    let content = chat_response
-        .choices
-        .first()
-        .map(|c| c.message.content.clone())
-        .ok_or_else(|| "Server returned empty choices array".to_string())?;
+    let content = chat_response.message.content;
 
     // Try to parse as JSON, otherwise return as string
     match serde_json::from_str::<serde_json::Value>(&content) {
@@ -212,6 +201,16 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Error: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+
+    // Model can come from CLI or prompt config
+    let model = args.model.as_ref().or(config.model.as_ref());
+    let model = match model {
+        Some(m) => m.clone(),
+        None => {
+            eprintln!("Error: --model is required (or set 'model' in prompt config)");
             return ExitCode::from(1);
         }
     };
@@ -248,15 +247,13 @@ fn main() -> ExitCode {
             }
         };
 
-        let format = detect_image_format(&image_data).unwrap(); // Safe: validated above
-
+        // Just validate format is recognized (already done in validate_image_file)
         if args.dry_run {
-            // In dry-run mode, just validate (already done above)
             continue;
         }
 
         // Call the model
-        match call_model(&client, &args.url, &config, &image_data, format) {
+        match call_model(&client, &args.url, &model, &config, &image_data) {
             Ok(response) => {
                 let record = OutputRecord {
                     file: path_str.to_string(),
@@ -461,42 +458,36 @@ mod tests {
         assert!(json.contains("\"barcode\":true"));
     }
 
-    // ==================== Chat Request Serialization Tests ====================
+    // ==================== Ollama Request Serialization Tests ====================
 
     #[test]
-    fn test_chat_request_serialization() {
-        let request = ChatRequest {
+    fn test_ollama_request_serialization() {
+        let request = OllamaChatRequest {
+            model: "qwen2.5vl:32b".to_string(),
             messages: vec![
-                ChatMessage {
+                OllamaChatMessage {
                     role: "system".to_string(),
-                    content: vec![ContentPart::Text {
-                        text: "You are helpful.".to_string(),
-                    }],
+                    content: "You are helpful.".to_string(),
+                    images: None,
                 },
-                ChatMessage {
+                OllamaChatMessage {
                     role: "user".to_string(),
-                    content: vec![
-                        ContentPart::ImageUrl {
-                            image_url: ImageUrlData {
-                                url: "data:image/png;base64,abc123".to_string(),
-                            },
-                        },
-                        ContentPart::Text {
-                            text: "Describe this.".to_string(),
-                        },
-                    ],
+                    content: "Describe this.".to_string(),
+                    images: Some(vec!["abc123".to_string()]),
                 },
             ],
-            temperature: 0.7,
+            stream: false,
+            options: OllamaOptions { temperature: 0.7 },
         };
 
         let json = serde_json::to_string(&request).unwrap();
 
         // Verify structure
+        assert!(json.contains("\"model\":\"qwen2.5vl:32b\""));
         assert!(json.contains("\"role\":\"system\""));
         assert!(json.contains("\"role\":\"user\""));
-        assert!(json.contains("\"type\":\"text\""));
-        assert!(json.contains("\"type\":\"image_url\""));
+        assert!(json.contains("\"images\":[\"abc123\"]"));
+        assert!(json.contains("\"stream\":false"));
         assert!(json.contains("\"temperature\":0.7"));
     }
 
