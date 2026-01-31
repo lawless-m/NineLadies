@@ -5,6 +5,7 @@ use std::fs;
 use std::io::{self, BufRead};
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "9ladies")]
@@ -98,7 +99,7 @@ fn detect_image_format(data: &[u8]) -> Option<&'static str> {
     }
 
     // WebP: starts with RIFF....WEBP
-    if data.len() >= 12 && data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
+    if data.starts_with(b"RIFF") && &data[8..12] == b"WEBP" {
         return Some("webp");
     }
 
@@ -194,7 +195,7 @@ fn call_model(
         .choices
         .first()
         .map(|c| c.message.content.clone())
-        .unwrap_or_default();
+        .ok_or_else(|| "Server returned empty choices array".to_string())?;
 
     // Try to parse as JSON, otherwise return as string
     match serde_json::from_str::<serde_json::Value>(&content) {
@@ -223,7 +224,10 @@ fn main() -> ExitCode {
         return ExitCode::from(0);
     }
 
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .expect("Failed to create HTTP client");
     let mut had_errors = false;
 
     for path_str in paths {
@@ -267,7 +271,7 @@ fn main() -> ExitCode {
         }
     }
 
-    if args.dry_run && had_errors {
+    if had_errors {
         ExitCode::from(1)
     } else {
         ExitCode::from(0)
