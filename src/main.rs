@@ -23,7 +23,7 @@ struct Args {
     dry_run: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct PromptConfig {
     system: String,
     prompt: String,
@@ -271,5 +271,274 @@ fn main() -> ExitCode {
         ExitCode::from(1)
     } else {
         ExitCode::from(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixtures_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+    }
+
+    // ==================== Image Format Detection Tests ====================
+
+    #[test]
+    fn test_detect_png() {
+        let data = fs::read(fixtures_dir().join("red.png")).unwrap();
+        assert_eq!(detect_image_format(&data), Some("png"));
+    }
+
+    #[test]
+    fn test_detect_jpeg() {
+        let data = fs::read(fixtures_dir().join("red.jpg")).unwrap();
+        assert_eq!(detect_image_format(&data), Some("jpeg"));
+    }
+
+    #[test]
+    fn test_detect_gif() {
+        let data = fs::read(fixtures_dir().join("red.gif")).unwrap();
+        assert_eq!(detect_image_format(&data), Some("gif"));
+    }
+
+    #[test]
+    fn test_detect_webp() {
+        let data = fs::read(fixtures_dir().join("red.webp")).unwrap();
+        assert_eq!(detect_image_format(&data), Some("webp"));
+    }
+
+    #[test]
+    fn test_detect_invalid_format() {
+        let data = b"This is not an image file";
+        assert_eq!(detect_image_format(data), None);
+    }
+
+    #[test]
+    fn test_detect_too_short() {
+        let data = b"short";
+        assert_eq!(detect_image_format(data), None);
+    }
+
+    #[test]
+    fn test_detect_empty() {
+        let data: &[u8] = &[];
+        assert_eq!(detect_image_format(data), None);
+    }
+
+    // ==================== Prompt Config Loading Tests ====================
+
+    #[test]
+    fn test_load_valid_prompt_config() {
+        let path = fixtures_dir().join("test-prompt.json");
+        let config = load_prompt_config(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(config.system, "You are a test assistant.");
+        assert_eq!(config.prompt, "Describe this image.");
+        assert!((config.temperature - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_load_invalid_prompt_config_missing_fields() {
+        let path = fixtures_dir().join("invalid-prompt.json");
+        let result = load_prompt_config(path.to_str().unwrap());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse"));
+    }
+
+    #[test]
+    fn test_load_nonexistent_prompt_config() {
+        let result = load_prompt_config("/nonexistent/path/config.json");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to read"));
+    }
+
+    #[test]
+    fn test_load_prompt_config_invalid_temperature() {
+        // Create a temp file with invalid temperature
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("invalid_temp_config.json");
+        fs::write(&temp_file, r#"{"system": "test", "prompt": "test", "temperature": 3.0}"#).unwrap();
+
+        let result = load_prompt_config(temp_file.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Temperature must be between"));
+
+        fs::remove_file(temp_file).ok();
+    }
+
+    // ==================== Image File Validation Tests ====================
+
+    #[test]
+    fn test_validate_png_image() {
+        let path = fixtures_dir().join("red.png");
+        let result = validate_image_file(&path);
+
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(!data.is_empty());
+        assert_eq!(detect_image_format(&data), Some("png"));
+    }
+
+    #[test]
+    fn test_validate_jpeg_image() {
+        let path = fixtures_dir().join("red.jpg");
+        let result = validate_image_file(&path);
+
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert_eq!(detect_image_format(&data), Some("jpeg"));
+    }
+
+    #[test]
+    fn test_validate_gif_image() {
+        let path = fixtures_dir().join("red.gif");
+        let result = validate_image_file(&path);
+
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert_eq!(detect_image_format(&data), Some("gif"));
+    }
+
+    #[test]
+    fn test_validate_webp_image() {
+        let path = fixtures_dir().join("red.webp");
+        let result = validate_image_file(&path);
+
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert_eq!(detect_image_format(&data), Some("webp"));
+    }
+
+    #[test]
+    fn test_validate_nonexistent_file() {
+        let path = Path::new("/nonexistent/image.png");
+        let result = validate_image_file(path);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("File not found"));
+    }
+
+    #[test]
+    fn test_validate_non_image_file() {
+        let path = fixtures_dir().join("not-an-image.txt");
+        let result = validate_image_file(&path);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Not a valid image format"));
+    }
+
+    // ==================== Output Record Serialization Tests ====================
+
+    #[test]
+    fn test_output_record_with_string_response() {
+        let record = OutputRecord {
+            file: "test.jpg".to_string(),
+            response: serde_json::Value::String("A red image".to_string()),
+        };
+
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"file\":\"test.jpg\""));
+        assert!(json.contains("\"response\":\"A red image\""));
+    }
+
+    #[test]
+    fn test_output_record_with_json_response() {
+        let record = OutputRecord {
+            file: "test.jpg".to_string(),
+            response: serde_json::json!({"barcode": true, "ingredients": false}),
+        };
+
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(json.contains("\"file\":\"test.jpg\""));
+        assert!(json.contains("\"barcode\":true"));
+    }
+
+    // ==================== Chat Request Serialization Tests ====================
+
+    #[test]
+    fn test_chat_request_serialization() {
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: vec![ContentPart::Text {
+                        text: "You are helpful.".to_string(),
+                    }],
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: vec![
+                        ContentPart::ImageUrl {
+                            image_url: ImageUrlData {
+                                url: "data:image/png;base64,abc123".to_string(),
+                            },
+                        },
+                        ContentPart::Text {
+                            text: "Describe this.".to_string(),
+                        },
+                    ],
+                },
+            ],
+            temperature: 0.7,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        // Verify structure
+        assert!(json.contains("\"role\":\"system\""));
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"type\":\"image_url\""));
+        assert!(json.contains("\"temperature\":0.7"));
+    }
+
+    // ==================== Integration-style Tests ====================
+
+    #[test]
+    fn test_full_validation_pipeline_with_known_images() {
+        let fixtures = fixtures_dir();
+        let prompt_path = fixtures.join("test-prompt.json");
+
+        // Load config
+        let config = load_prompt_config(prompt_path.to_str().unwrap()).unwrap();
+        assert_eq!(config.system, "You are a test assistant.");
+
+        // Validate all test images
+        let test_images = ["red.png", "red.jpg", "red.gif", "red.webp"];
+
+        for image_name in test_images {
+            let image_path = fixtures.join(image_name);
+            let data = validate_image_file(&image_path).unwrap();
+            let format = detect_image_format(&data).unwrap();
+
+            // Verify we can encode to base64 for API call
+            let encoded = BASE64.encode(&data);
+            assert!(!encoded.is_empty());
+
+            // Verify data URL format
+            let data_url = format!("data:image/{};base64,{}", format, encoded);
+            assert!(data_url.starts_with("data:image/"));
+        }
+    }
+
+    #[test]
+    fn test_dry_run_detects_invalid_files() {
+        let fixtures = fixtures_dir();
+
+        // Valid image should pass
+        let valid_path = fixtures.join("red.png");
+        assert!(validate_image_file(&valid_path).is_ok());
+
+        // Invalid image should fail
+        let invalid_path = fixtures.join("not-an-image.txt");
+        assert!(validate_image_file(&invalid_path).is_err());
+
+        // Nonexistent file should fail
+        let missing_path = fixtures.join("does-not-exist.png");
+        assert!(validate_image_file(&missing_path).is_err());
     }
 }
