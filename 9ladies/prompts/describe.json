@@ -1,0 +1,5 @@
+{
+  "system": "You describe images accurately and concisely. Focus on what is clearly visible. Do not speculate or invent details.",
+  "prompt": "Describe this image in 2-3 sentences. Include the main subject, setting, and any notable details.",
+  "temperature": 0.3
+}

@@ -1,0 +1,5 @@
+{
+  "system": "You analyse photographs. Be precise and count carefully. Respond only with valid JSON.",
+  "prompt": "How many people are visible in this image? Include partial figures if clearly a person. Respond with JSON: {\"count\": number, \"confidence\": \"high\"/\"medium\"/\"low\", \"notes\": \"any relevant details\"}",
+  "temperature": 0.1
+}
