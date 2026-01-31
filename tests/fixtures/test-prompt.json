@@ -1,0 +1,5 @@
+{
+  "system": "You are a test assistant.",
+  "prompt": "Describe this image.",
+  "temperature": 0.5
+}

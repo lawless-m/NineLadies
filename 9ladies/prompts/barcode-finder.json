@@ -1,0 +1,5 @@
+{
+  "system": "You analyse product packaging images. Respond only with valid JSON, no markdown formatting.",
+  "prompt": "Examine this product image. Does it show a barcode? Does it show an ingredients list? Respond with JSON: {\"barcode\": true/false, \"ingredients\": true/false, \"notes\": \"brief description if relevant\"}",
+  "temperature": 0.1
+}
